@@ -2,6 +2,10 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { formatErrorMessage } from "openclaw/plugin-sdk/error-runtime";
+import {
+  isRecord,
+  normalizeOptionalString as readNonEmptyString,
+} from "openclaw/plugin-sdk/string-coerce-runtime";
 import { scanDirectReplyTranscriptSentinels } from "./gateway-log-sentinel.js";
 import { liveTurnTimeoutMs } from "./suite-runtime-agent-common.js";
 import type {
@@ -16,6 +20,11 @@ type QaGatewayCallEnv = Pick<
 >;
 
 const SESSION_STORE_LOCK_RETRY_DELAYS_MS = [1_000, 3_000, 5_000] as const;
+let sessionStoreLockRetryDelaysMsForTests: readonly number[] | undefined;
+
+function resolveSessionStoreLockRetryDelaysMs(): readonly number[] {
+  return sessionStoreLockRetryDelaysMsForTests ?? SESSION_STORE_LOCK_RETRY_DELAYS_MS;
+}
 
 type QaSessionTranscriptSummary = {
   finalText: string;
@@ -29,14 +38,6 @@ function isSessionStoreLockTimeout(error: unknown) {
     text.includes("SessionWriteLockTimeoutError") ||
     text.includes("session file locked")
   );
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-}
-
-function readNonEmptyString(value: unknown): string | undefined {
-  return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
 }
 
 function extractSessionTranscriptText(message: Record<string, unknown>) {
@@ -104,17 +105,15 @@ async function callGatewayWithSessionStoreLockRetry<T>(
   params: Record<string, unknown>,
   options: { timeoutMs: number },
 ) {
-  for (let attempt = 0; attempt <= SESSION_STORE_LOCK_RETRY_DELAYS_MS.length; attempt += 1) {
+  const retryDelaysMs = resolveSessionStoreLockRetryDelaysMs();
+  for (let attempt = 0; attempt <= retryDelaysMs.length; attempt += 1) {
     try {
       return (await env.gateway.call(method, params, options)) as T;
     } catch (error) {
-      if (
-        !isSessionStoreLockTimeout(error) ||
-        attempt === SESSION_STORE_LOCK_RETRY_DELAYS_MS.length
-      ) {
+      if (!isSessionStoreLockTimeout(error) || attempt === retryDelaysMs.length) {
         throw error;
       }
-      await sleep(SESSION_STORE_LOCK_RETRY_DELAYS_MS[attempt]);
+      await sleep(retryDelaysMs[attempt]);
     }
   }
   throw new Error(`${method} failed after session store lock retries`);
@@ -247,4 +246,9 @@ export {
   readRawQaSessionStore,
   readSessionTranscriptSummary,
   readSkillStatus,
+  setSessionStoreLockRetryDelaysMsForTests,
 };
+
+function setSessionStoreLockRetryDelaysMsForTests(delays?: readonly number[]): void {
+  sessionStoreLockRetryDelaysMsForTests = delays;
+}
