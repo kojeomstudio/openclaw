@@ -1,3 +1,6 @@
+/**
+ * Shared gateway-token session rotation tests.
+ */
 import fs from "node:fs/promises";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
@@ -65,7 +68,7 @@ beforeAll(async () => {
     });
     configSetRotationCase = {
       closed: await closed,
-      setOk: setRes.ok === true,
+      setOk: setRes.ok,
     };
   } finally {
     ws.close();

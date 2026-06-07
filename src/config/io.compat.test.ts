@@ -1,3 +1,4 @@
+// Verifies config IO compatibility loading and migration behavior.
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -21,7 +22,7 @@ async function writeConfig(
   home: string,
   dirname: ".openclaw",
   port: number,
-  filename: string = "openclaw.json",
+  filename = "openclaw.json",
 ) {
   const dir = path.join(home, dirname);
   await fs.mkdir(dir, { recursive: true });

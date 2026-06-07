@@ -1,3 +1,4 @@
+// Normalizes provider auth choice metadata from plugin setup surfaces.
 import { isRecord as isPlainRecord } from "@openclaw/normalization-core/record-coerce";
 import {
   normalizeLowercaseStringOrEmpty,
@@ -198,14 +199,14 @@ function normalizeAgentListForWrite(value: unknown): unknown {
     }
 
     let nextAgent = agent;
-    if (Object.prototype.hasOwnProperty.call(agent, "model")) {
+    if (Object.hasOwn(agent, "model")) {
       const normalizedModel = normalizeAgentModelConfigForWrite(agent.model);
       if (normalizedModel !== agent.model) {
         nextAgent = { ...nextAgent, model: normalizedModel };
         mutated = true;
       }
     }
-    if (Object.prototype.hasOwnProperty.call(agent, "models")) {
+    if (Object.hasOwn(agent, "models")) {
       const normalizedModels = normalizeAgentModelMapForWrite(agent.models);
       if (normalizedModels !== agent.models) {
         nextAgent = { ...nextAgent, models: normalizedModels };

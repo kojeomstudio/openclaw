@@ -1,3 +1,4 @@
+// Maintains plugin manifest lookup tables for discovery and runtime planning.
 import fs from "node:fs";
 import path from "node:path";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
@@ -326,7 +327,7 @@ function mergePackageChannelMetaIntoChannelConfigs(params: {
     !channelId ||
     isBlockedObjectKey(channelId) ||
     !params.channelConfigs ||
-    !Object.prototype.hasOwnProperty.call(params.channelConfigs, channelId)
+    !Object.hasOwn(params.channelConfigs, channelId)
   ) {
     return params.channelConfigs;
   }
@@ -712,7 +713,7 @@ function pushNonBundledChannelConfigDescriptorDiagnostic(params: {
   }
   const channelConfigs = params.record.channelConfigs ?? {};
   const missingChannels = declaredChannels.filter(
-    (channelId) => !Object.prototype.hasOwnProperty.call(channelConfigs, channelId),
+    (channelId) => !Object.hasOwn(channelConfigs, channelId),
   );
   if (missingChannels.length === 0) {
     return;

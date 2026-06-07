@@ -1,3 +1,4 @@
+// Workspace skill loading helpers discover and load skills from workspace directories.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -63,12 +64,12 @@ function resolveNativeUserHomeDir(): string | undefined {
 
 function resolveCompactHomePrefixes(): string[] {
   const homes = [resolveHomeDir(), resolveUserHomeDir(), resolveNativeUserHomeDir()].filter(
-    (home): home is string => !!home,
+    (home): home is string => Boolean(home),
   );
   const resolvedHomes = homes.map((home) => path.resolve(home));
   const realHomes = resolvedHomes
     .map((home) => tryRealpath(home))
-    .filter((home): home is string => !!home);
+    .filter((home): home is string => Boolean(home));
   return uniqueStrings([...resolvedHomes, ...realHomes]).toSorted((a, b) => b.length - a.length);
 }
 
@@ -291,8 +292,7 @@ function containsDiscoverableSkill(
 ): boolean {
   const discoveryBudget = createSkillDiscoveryBudget(opts.maxCandidateDirs);
   const queue: Array<{ dir: string; depth: number }> = [{ dir, depth: 0 }];
-  for (let index = 0; index < queue.length; index += 1) {
-    const candidate = queue[index];
+  for (const candidate of queue) {
     if (!candidate) {
       continue;
     }
@@ -372,7 +372,7 @@ function hasLoadableSkillFrontmatter(
   });
   const fallbackName = path.basename(skillDir).trim();
   const name = frontmatter?.name?.trim() || fallbackName;
-  return !!name && !!frontmatter?.description?.trim();
+  return Boolean(name) && Boolean(frontmatter?.description?.trim());
 }
 
 function tryRealpath(filePath: string): string | null {
@@ -520,8 +520,7 @@ export function resolveNestedSkillsRoot(
   // child-directory filter as discovery so ignored folders cannot re-root.
   const discoveryBudget = createSkillDiscoveryBudget(scanLimit);
   const queue: Array<{ dir: string; depth: number }> = [{ dir: nested, depth: 0 }];
-  for (let index = 0; index < queue.length; index += 1) {
-    const candidate = queue[index];
+  for (const candidate of queue) {
     if (!candidate) {
       continue;
     }
@@ -999,8 +998,7 @@ function loadSkillEntries(
       }),
     );
 
-    for (let queueIndex = 0; queueIndex < scanQueue.length; queueIndex += 1) {
-      const candidate = scanQueue[queueIndex];
+    for (const candidate of scanQueue) {
       if (!candidate) {
         continue;
       }
@@ -1555,7 +1553,7 @@ export async function syncSkillsToWorkspace(params: {
 
     const usedDirNames = new Set<string>();
     for (const entry of entries) {
-      let dest: string | null = null;
+      let dest: string | null;
       try {
         dest = resolveSyncedSkillDestinationPath({
           targetSkillsDir,

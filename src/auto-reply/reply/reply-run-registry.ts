@@ -1,3 +1,4 @@
+// Tracks active reply runs so stop, queue, and status commands can coordinate.
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import {
   markDiagnosticEmbeddedRunEnded,
@@ -50,6 +51,7 @@ export type ReplyOperationResult =
 export type ReplyOperation = {
   readonly key: ReplyRunKey;
   readonly sessionId: string;
+  readonly routeThreadId?: string | number;
   readonly abortSignal: AbortSignal;
   readonly resetTriggered: boolean;
   readonly phase: ReplyOperationPhase;
@@ -74,6 +76,7 @@ export type ReplyRunRegistry = {
     sessionKey: string;
     sessionId: string;
     resetTriggered: boolean;
+    routeThreadId?: string | number;
     upstreamAbortSignal?: AbortSignal;
   }): ReplyOperation;
   get(sessionKey: string): ReplyOperation | undefined;
@@ -227,6 +230,7 @@ export function createReplyOperation(params: {
   sessionKey: string;
   sessionId: string;
   resetTriggered: boolean;
+  routeThreadId?: string | number;
   upstreamAbortSignal?: AbortSignal;
 }): ReplyOperation {
   const sessionKey = normalizeOptionalString(params.sessionKey);
@@ -298,6 +302,9 @@ export function createReplyOperation(params: {
     },
     get sessionId() {
       return currentSessionId;
+    },
+    get routeThreadId() {
+      return params.routeThreadId;
     },
     get abortSignal() {
       return controller.signal;
@@ -501,6 +508,10 @@ export const replyRunRegistry: ReplyRunRegistry = {
 
 export function resolveActiveReplyRunSessionId(sessionKey: string): string | undefined {
   return replyRunRegistry.resolveSessionId(sessionKey);
+}
+
+export function resolveActiveReplyRunThreadId(sessionKey: string): string | number | undefined {
+  return replyRunRegistry.get(sessionKey)?.routeThreadId;
 }
 
 export function isReplyRunActiveForSessionId(sessionId: string): boolean {

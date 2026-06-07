@@ -1,3 +1,4 @@
+// Verifies plugin manifest registry construction and lookups.
 import fs from "node:fs";
 import path from "node:path";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
@@ -1457,9 +1458,9 @@ describe("loadPluginManifestRegistry", () => {
       throw new Error("expected external chat manifest channel config map");
     }
     expect(Object.getPrototypeOf(channelConfigs)).toBe(null);
-    expect(Object.prototype.hasOwnProperty.call(channelConfigs, "__proto__")).toBe(false);
-    expect(Object.prototype.hasOwnProperty.call(channelConfigs, "constructor")).toBe(false);
-    expect(Object.prototype.hasOwnProperty.call(channelConfigs, "prototype")).toBe(false);
+    expect(Object.hasOwn(channelConfigs, "__proto__")).toBe(false);
+    expect(Object.hasOwn(channelConfigs, "constructor")).toBe(false);
+    expect(Object.hasOwn(channelConfigs, "prototype")).toBe(false);
     expectRecordFields(channelConfigs["safe-chat"]?.schema, "safe-chat schema", {
       type: "object",
       additionalProperties: false,
@@ -1878,6 +1879,7 @@ describe("loadPluginManifestRegistry", () => {
             {
               rootPath: "plugins.entries.openai.config",
               overlayPath: "image",
+              overlayMapPath: "accounts",
               required: ["apiKey"],
             },
           ],
@@ -1953,6 +1955,7 @@ describe("loadPluginManifestRegistry", () => {
           {
             rootPath: "plugins.entries.openai.config",
             overlayPath: "image",
+            overlayMapPath: "accounts",
             required: ["apiKey"],
           },
         ],
