@@ -4,7 +4,6 @@ import { describe, expect, it, vi } from "vitest";
 import { createInlineCodeState } from "../../packages/markdown-core/src/code-spans.js";
 import { createStreamingDirectiveAccumulator } from "../auto-reply/reply/streaming-directives.js";
 import {
-  buildAssistantStreamData,
   consumePendingAssistantReplyDirectivesIntoReply,
   consumePendingToolMediaIntoReply,
   consumePendingToolMediaReply,
@@ -12,8 +11,6 @@ import {
   handleMessageUpdate,
   hasAssistantVisibleReply,
   readPendingToolMediaReply,
-  recordPendingAssistantReplyDirectives,
-  resolveSilentReplyFallbackText,
 } from "./embedded-agent-subscribe.handlers.messages.js";
 import type { EmbeddedAgentSubscribeContext } from "./embedded-agent-subscribe.handlers.types.js";
 import {
@@ -105,9 +102,11 @@ function createMessageEndContext(
     finalizeAssistantTexts?: ReturnType<typeof vi.fn>;
     flushBlockReplyBuffer?: ReturnType<typeof vi.fn>;
     consumeReplyDirectives?: ReturnType<typeof vi.fn>;
+    stripBlockTags?: ReturnType<typeof vi.fn>;
     warn?: ReturnType<typeof vi.fn>;
     builtinToolNames?: ReadonlySet<string>;
     sourceReplyDeliveryMode?: "automatic" | "message_tool_only";
+    enforceFinalTag?: boolean;
     blockChunker?: { hasBuffered: () => boolean; reset: () => void };
     state?: Record<string, unknown>;
   } = {},
@@ -122,6 +121,7 @@ function createMessageEndContext(
       ...(params.sourceReplyDeliveryMode
         ? { sourceReplyDeliveryMode: params.sourceReplyDeliveryMode }
         : {}),
+      ...(params.enforceFinalTag !== undefined ? { enforceFinalTag: params.enforceFinalTag } : {}),
       ...(params.onAgentEvent ? { onAgentEvent: params.onAgentEvent } : {}),
       ...(params.onBlockReply ? { onBlockReply: params.onBlockReply } : { onBlockReply: vi.fn() }),
     },
@@ -159,7 +159,7 @@ function createMessageEndContext(
     commitAssistantUsage: vi.fn(),
     log: { debug: vi.fn(), info: vi.fn(), warn: params.warn ?? vi.fn() },
     builtinToolNames: params.builtinToolNames,
-    stripBlockTags: (text: string) => text,
+    stripBlockTags: params.stripBlockTags ?? vi.fn((text: string) => text),
     finalizeAssistantTexts: params.finalizeAssistantTexts ?? vi.fn(),
     emitAssistantStreamData: vi.fn(
       (data: Parameters<EmbeddedAgentSubscribeContext["emitAssistantStreamData"]>[0]) => {
@@ -199,50 +199,6 @@ function createMessageToolEnvelope(message: string, args: Record<string, unknown
   });
 }
 
-describe("resolveSilentReplyFallbackText", () => {
-  it("replaces NO_REPLY with latest messaging tool text when available", () => {
-    expect(
-      resolveSilentReplyFallbackText({
-        text: "NO_REPLY",
-        messagingToolSentTexts: ["first", "final delivered text"],
-      }),
-    ).toBe("final delivered text");
-  });
-
-  it("keeps original text when response is not NO_REPLY", () => {
-    expect(
-      resolveSilentReplyFallbackText({
-        text: "normal assistant reply",
-        messagingToolSentTexts: ["final delivered text"],
-      }),
-    ).toBe("normal assistant reply");
-  });
-
-  it("keeps NO_REPLY when there is no messaging tool text to mirror", () => {
-    expect(
-      resolveSilentReplyFallbackText({
-        text: "NO_REPLY",
-        messagingToolSentTexts: [],
-      }),
-    ).toBe("NO_REPLY");
-  });
-
-  it("tolerates malformed text payloads without throwing", () => {
-    expect(
-      resolveSilentReplyFallbackText({
-        text: undefined,
-        messagingToolSentTexts: ["final delivered text"],
-      }),
-    ).toBe("");
-    expect(
-      resolveSilentReplyFallbackText({
-        text: "NO_REPLY",
-        messagingToolSentTexts: [42 as unknown as string],
-      }),
-    ).toBe("42");
-  });
-});
-
 describe("hasAssistantVisibleReply", () => {
   it("treats audio-only payloads as visible", () => {
     expect(hasAssistantVisibleReply({ audioAsVoice: true })).toBe(true);
@@ -255,38 +211,16 @@ describe("hasAssistantVisibleReply", () => {
   });
 });
 
-describe("buildAssistantStreamData", () => {
-  it("normalizes media payloads for assistant stream events", () => {
-    expect(
-      buildAssistantStreamData({
-        text: "hello",
-        delta: "he",
-        replace: true,
-        mediaUrl: "https://example.com/a.png",
-        phase: "final_answer",
-      }),
-    ).toEqual({
-      text: "hello",
-      delta: "he",
-      replace: true,
-      mediaUrls: ["https://example.com/a.png"],
-      phase: "final_answer",
-    });
-  });
-});
-
 describe("pending assistant reply directives", () => {
   it("merges directive metadata into the next non-reasoning block reply", () => {
-    const state = { pendingAssistantReplyDirectives: undefined };
-
-    recordPendingAssistantReplyDirectives(state, {
-      text: "",
-      mediaUrls: ["/tmp/reply.ogg"],
-      replyToCurrent: true,
-      replyToTag: true,
-      audioAsVoice: true,
-      isSilent: false,
-    });
+    const state = {
+      pendingAssistantReplyDirectives: {
+        mediaUrls: ["/tmp/reply.ogg"],
+        replyToCurrent: true,
+        replyToTag: true,
+        audioAsVoice: true,
+      },
+    };
 
     expect(
       consumePendingAssistantReplyDirectivesIntoReply(state, {
@@ -1227,6 +1161,76 @@ describe("handleMessageEnd", () => {
       text: "",
       mediaUrls: ["/tmp/final.png"],
     });
+  });
+
+  it("preserves literal reasoning-looking tags in unphased final visible text", () => {
+    const onAgentEvent = vi.fn();
+    const stripBlockTags = vi.fn(() => "Before");
+    const ctx = createMessageEndContext({
+      onAgentEvent,
+      stripBlockTags,
+      consumeReplyDirectives: vi.fn((text: string) => ({ text })),
+      state: {
+        blockBuffer: "",
+        deltaBuffer: "",
+      },
+    });
+
+    void handleMessageEnd(ctx, {
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: [
+          {
+            type: "text",
+            text: "Before <think>literal tag text after",
+            textSignature: JSON.stringify({ v: 1, id: "item_unphased" }),
+          },
+        ],
+        usage: { input: 10, output: 5, total: 15 },
+      },
+    } as never);
+
+    expect(stripBlockTags).not.toHaveBeenCalled();
+    expect(firstMockArg(ctx.emitAssistantStreamData as never, "assistant stream")).toMatchObject({
+      text: "Before <think>literal tag text after",
+      delta: "Before <think>literal tag text after",
+    });
+    expect(ctx.finalizeAssistantTexts).toHaveBeenCalledWith(
+      expect.objectContaining({ text: "Before <think>literal tag text after" }),
+    );
+  });
+
+  it("keeps final-tag enforcement in message_end fallback", () => {
+    const onAgentEvent = vi.fn();
+    const stripBlockTags = vi.fn(() => "");
+    const ctx = createMessageEndContext({
+      enforceFinalTag: true,
+      onAgentEvent,
+      stripBlockTags,
+      consumeReplyDirectives: vi.fn((text: string) => ({ text })),
+      state: {
+        blockBuffer: "",
+        deltaBuffer: "",
+      },
+    });
+
+    void handleMessageEnd(ctx, {
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: "Hello world",
+        usage: { input: 10, output: 5, total: 15 },
+      },
+    } as never);
+
+    expect(stripBlockTags).toHaveBeenCalledWith(
+      "Hello world",
+      { thinking: false, final: false },
+      { final: true },
+    );
+    expect(ctx.emitAssistantStreamData).not.toHaveBeenCalled();
+    expect(ctx.finalizeAssistantTexts).toHaveBeenCalledWith(expect.objectContaining({ text: "" }));
   });
 
   it("emits a replacement final assistant event when final_answer appears only at message_end", () => {
