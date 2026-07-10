@@ -2,10 +2,21 @@ package ai.openclaw.app.ui
 
 import ai.openclaw.app.GatewayConnectionProblem
 import ai.openclaw.app.GatewayNodeCapabilityApproval
+import ai.openclaw.app.LocationMode
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
 class SettingsScreensTest {
+  @Test
+  fun locationModes_hideAlwaysFromPlayAndMapThirdPartySelection() {
+    assertEquals(listOf("Off", "While Using"), locationModeLabels(backgroundLocationAvailable = false))
+    assertEquals(
+      listOf("Off", "While Using", "Always"),
+      locationModeLabels(backgroundLocationAvailable = true),
+    )
+    assertEquals(LocationMode.Always, locationModeForLabel("Always"))
+  }
+
   @Test
   fun androidDistributionChannelUsesBuildFlavorLabels() {
     assertEquals("Play", androidDistributionChannel("play"))
@@ -79,6 +90,36 @@ class SettingsScreensTest {
       gatewayNodeApprovalCommand(GatewayNodeCapabilityApproval.PendingReapproval("request-1; unsafe")),
     )
     assertEquals(null, gatewayNodeApprovalCommand(GatewayNodeCapabilityApproval.Approved))
+  }
+
+  @Test
+  fun cronDetailRefreshRecoversWhenDirtyDraftHasNoLoadedJob() {
+    assertEquals(
+      true,
+      cronDetailRefreshEnabled(
+        isConnected = true,
+        loading = false,
+        hasCurrentJob = false,
+        draftRequiresResolution = true,
+        saveSucceeded = false,
+      ),
+    )
+    assertEquals(
+      false,
+      cronDetailRefreshEnabled(
+        isConnected = true,
+        loading = false,
+        hasCurrentJob = true,
+        draftRequiresResolution = true,
+        saveSucceeded = false,
+      ),
+    )
+  }
+
+  @Test
+  fun cronDetailDisposalRetainsTransientStateOnlyForActivityRecreation() {
+    assertEquals(false, cronDetailDisposalClearsTransientState(isChangingConfigurations = true))
+    assertEquals(true, cronDetailDisposalClearsTransientState(isChangingConfigurations = false))
   }
 
   private fun authProblem(code: String): GatewayConnectionProblem =
