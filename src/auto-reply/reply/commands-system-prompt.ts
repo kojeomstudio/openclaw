@@ -9,7 +9,7 @@ import {
   mapSandboxSkillEntriesForPrompt,
   resolveSandboxSkillRuntimeInputs,
 } from "../../agents/embedded-agent-runner/sandbox-skills.js";
-import { canExecRequestNode } from "../../agents/exec-defaults.js";
+import { resolveNodeExecEligibility } from "../../agents/exec-defaults.js";
 import { resolveDefaultModelForAgent } from "../../agents/model-selection.js";
 import { resolveAgentPromptSurfaceForSessionKey } from "../../agents/prompt-surface.js";
 import type { AgentTool } from "../../agents/runtime/index.js";
@@ -21,7 +21,7 @@ import { buildConfiguredAgentSystemPrompt } from "../../agents/system-prompt-con
 import { buildSystemPromptParams } from "../../agents/system-prompt-params.js";
 import type { WorkspaceBootstrapFile } from "../../agents/workspace.js";
 import { listRegisteredPluginAgentPromptGuidance } from "../../plugins/command-registry-state.js";
-import { resolveSkillsPromptForRun } from "../../skills/loading/workspace.js";
+import { resolveSkillsPrompt } from "../../skills/loading/workspace-skill-prompt.js";
 import { resolveEmbeddedRunSkillEntries } from "../../skills/runtime/embedded-run-entries.js";
 import { getRemoteSkillEligibility } from "../../skills/runtime/remote.js";
 import { resolveReusableWorkspaceSkillSnapshot } from "../../skills/runtime/session-snapshot.js";
@@ -45,25 +45,28 @@ function resolveCommandSkillsEligibility(params: {
   sessionKey: string | undefined;
 }): SkillEligibilityContext {
   try {
+    const nodeSkills = resolveNodeExecEligibility({
+      cfg: params.config,
+      sessionEntry: params.sessionEntry,
+      sessionKey: params.sessionKey,
+      agentId: params.agentId,
+    });
     return {
+      nodeSkills,
       remote: getRemoteSkillEligibility({
-        advertiseExecNode: canExecRequestNode({
-          cfg: params.config,
-          sessionEntry: params.sessionEntry,
-          sessionKey: params.sessionKey,
-          agentId: params.agentId,
-        }),
+        advertiseExecNode: nodeSkills.canExec,
       }),
     };
   } catch {
     try {
       return {
+        nodeSkills: { canExec: false },
         remote: getRemoteSkillEligibility({
           advertiseExecNode: false,
         }),
       };
     } catch {
-      return {};
+      return { nodeSkills: { canExec: false } };
     }
   }
 }
@@ -124,7 +127,7 @@ async function resolveCommandSkillsPrompt(params: {
           skillsWorkspaceDir,
           skillsPromptWorkspaceDir,
         });
-        return resolveSkillsPromptForRun({
+        return resolveSkillsPrompt({
           skillsSnapshot: skillsSnapshotForRun,
           entries: promptSkillEntries,
           config: params.config,
@@ -169,9 +172,11 @@ export async function resolveCommandsSystemPromptBundle(
     config: params.cfg,
     sessionKey: params.sessionKey,
     sessionId: targetSessionEntry?.sessionId,
+    chatType: targetSessionEntry?.chatType,
     agentId: sessionAgentId,
   });
   const toolPolicySessionKey = resolveRuntimePolicySessionKey({
+    agentId: sessionAgentId,
     cfg: params.cfg,
     ctx: params.ctx,
     sessionKey: params.sessionKey,
@@ -225,7 +230,7 @@ export async function resolveCommandsSystemPromptBundle(
     agentId: sessionAgentId,
   });
   const defaultModelLabel = `${defaultModelRef.provider}/${defaultModelRef.model}`;
-  const { runtimeInfo, userTimezone, userTime, userTimeFormat } = buildSystemPromptParams({
+  const { runtimeInfo, userTimezone, userDate } = buildSystemPromptParams({
     config: params.cfg,
     agentId: sessionAgentId,
     workspaceDir,
@@ -274,8 +279,7 @@ export async function resolveCommandsSystemPromptBundle(
     reasoningTagHint: false,
     toolNames,
     userTimezone,
-    userTime,
-    userTimeFormat,
+    userDate,
     contextFiles: injectedFiles,
     skillsPrompt,
     heartbeatPrompt: undefined,

@@ -59,9 +59,15 @@ function resolveComparableSessionKeyForSandbox(params: {
 export function resolveSandboxRuntimeStatus(params: {
   cfg?: OpenClawConfig;
   sessionKey?: string;
+  agentId?: string;
+  /** Independent execution identity used for sandbox mode and policy classification. */
+  classificationSessionKey?: string;
+  classificationAgentId?: string;
 }): {
   agentId: string;
   sessionKey: string;
+  classificationAgentId: string;
+  classificationSessionKey: string;
   mainSessionKey: string;
   mode: SandboxConfig["mode"];
   sandboxed: boolean;
@@ -71,24 +77,37 @@ export function resolveSandboxRuntimeStatus(params: {
   const agentId = resolveSessionAgentId({
     sessionKey,
     config: params.cfg,
+    agentId: params.agentId,
+  });
+  const classificationSessionKey = params.classificationSessionKey?.trim() || sessionKey;
+  const classificationAgentId = resolveSessionAgentId({
+    sessionKey: classificationSessionKey,
+    config: params.cfg,
+    agentId: params.classificationAgentId,
   });
   const cfg = params.cfg;
-  const sandboxCfg = resolveSandboxConfigForAgent(cfg, agentId);
-  const mainSessionKey = resolveMainSessionKeyForSandbox({ cfg, agentId });
-  const sandboxed = sessionKey
+  const sandboxCfg = resolveSandboxConfigForAgent(cfg, classificationAgentId);
+  const mainSessionKey = resolveMainSessionKeyForSandbox({ cfg, agentId: classificationAgentId });
+  const sandboxed = classificationSessionKey
     ? shouldSandboxSession(
         sandboxCfg,
-        resolveComparableSessionKeyForSandbox({ cfg, agentId, sessionKey }),
+        resolveComparableSessionKeyForSandbox({
+          cfg,
+          agentId: classificationAgentId,
+          sessionKey: classificationSessionKey,
+        }),
         mainSessionKey,
       )
     : false;
   return {
     agentId,
     sessionKey,
+    classificationAgentId,
+    classificationSessionKey,
     mainSessionKey,
     mode: sandboxCfg.mode,
     sandboxed,
-    toolPolicy: resolveSandboxToolPolicyForAgent(cfg, agentId),
+    toolPolicy: resolveSandboxToolPolicyForAgent(cfg, classificationAgentId),
   };
 }
 

@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
+import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { afterEach, describe, expect, it } from "vitest";
 import {
@@ -49,6 +50,7 @@ describe("ClawRouter managed gateway contract", () => {
       },
     });
     instances.push(instance);
+    const logFile = path.join(instance.stateDir, "clawrouter.log");
 
     const patchPath = await instance.state.writeText(
       "clawrouter.patch.json5",
@@ -67,6 +69,7 @@ describe("ClawRouter managed gateway contract", () => {
               },
             },
           },
+          logging: { file: logFile },
           agents: { defaults: { model: { primary: MODEL_REF } } },
         },
         null,
@@ -183,15 +186,22 @@ describe("ClawRouter managed gateway contract", () => {
       },
     });
     const sessionId = inferenceRequests.at(-1)?.headers["x-clawrouter-session-id"];
+    const requestId = inferenceRequests.at(-1)?.headers["x-request-id"];
     expect(JSON.stringify(inferenceRequests.at(-1)?.body)).toContain(SUCCESS_MARKER);
     expect(typeof sessionId).toBe("string");
     expect(String(sessionId).length).toBeGreaterThan(0);
     expect(String(sessionId).length).toBeLessThanOrEqual(256);
+    expect(typeof requestId).toBe("string");
+    expect(String(requestId)).toMatch(/:model:\d+$/u);
+    expect(String(requestId).length).toBeLessThanOrEqual(128);
 
-    expect(instance.logs()).toContain(
+    // File logging is synchronous at the transport boundary. The gateway's
+    // piped stdout can be delivered after the agent RPC has already completed.
+    const fileLog = await fs.readFile(logFile, "utf8");
+    expect(fileLog).toContain(
       `[model-fetch] start provider=clawrouter api=openai-responses model=${MODEL_ID} method=POST url=${router.baseUrl}/v1/responses`,
     );
-    expect(instance.logs()).toContain(
+    expect(fileLog).toContain(
       `[model-fetch] response provider=clawrouter api=openai-responses model=${MODEL_ID} status=200`,
     );
     expect(
@@ -206,6 +216,7 @@ describe("ClawRouter managed gateway contract", () => {
         probe.stderr,
         agent.stdout,
         agent.stderr,
+        fileLog,
         instance.logs(),
       ].join("\n"),
     ).not.toContain(API_KEY);
@@ -216,7 +227,8 @@ async function waitForGatewayReadiness(
   instance: OpenClawTestInstance,
 ): Promise<{ ready: boolean; failing: string[] }> {
   const url = `http://127.0.0.1:${instance.port}/readyz`;
-  for (let attempt = 0; attempt < 200; attempt += 1) {
+  // Preserve the 10-second readiness budget while detecting startup sooner.
+  for (let attempt = 0; attempt < 1_000; attempt += 1) {
     try {
       const response = await fetch(url);
       if (response.ok) {
@@ -225,7 +237,7 @@ async function waitForGatewayReadiness(
     } catch {
       // The listener can open before startup readiness settles.
     }
-    await delay(50);
+    await delay(10);
   }
   throw new Error(`gateway did not become ready: ${instance.logs()}`);
 }
@@ -233,16 +245,20 @@ async function waitForGatewayReadiness(
 async function startFakeClawRouter(): Promise<FakeClawRouter> {
   const requests: CapturedRequest[] = [];
   const server = createServer((req, res) => {
-    void handleClawRouterRequest(req, res, requests).catch((error) => {
+    void handleClawRouterRequest(req, res, requests).catch((error: unknown) => {
       res.writeHead(500, { "content-type": "application/json" });
       res.end(JSON.stringify({ error: { message: String(error) } }));
     });
   });
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  await new Promise<void>((resolve) => {
+    server.listen(0, "127.0.0.1", resolve);
+  });
   const address = server.address();
   if (!address || typeof address === "string") {
     server.closeAllConnections();
-    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await new Promise<void>((resolve) => {
+      server.close(() => resolve());
+    });
     throw new Error("fake ClawRouter did not bind a TCP port");
   }
   return {
@@ -250,7 +266,9 @@ async function startFakeClawRouter(): Promise<FakeClawRouter> {
     requests,
     close: async () => {
       server.closeAllConnections();
-      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await new Promise<void>((resolve) => {
+        server.close(() => resolve());
+      });
     },
   };
 }
@@ -261,13 +279,19 @@ async function handleClawRouterRequest(
   requests: CapturedRequest[],
 ): Promise<void> {
   const method = req.method ?? "GET";
-  const path = new URL(req.url ?? "/", "http://127.0.0.1").pathname;
+  const requestPath = new URL(req.url ?? "/", "http://127.0.0.1").pathname;
   const bodyText = await readRequestBody(req);
   const body = bodyText ? (JSON.parse(bodyText) as Record<string, unknown>) : undefined;
   const authorization = req.headers.authorization;
-  requests.push({ method, path, authorization, headers: { ...req.headers }, body });
+  requests.push({
+    method,
+    path: requestPath,
+    authorization,
+    headers: { ...req.headers },
+    body,
+  });
 
-  if (method === "GET" && path === "/v1/health") {
+  if (method === "GET" && requestPath === "/v1/health") {
     writeJson(res, 200, {
       ok: true,
       environment: "fakeco",
@@ -284,7 +308,7 @@ async function handleClawRouterRequest(
     return;
   }
 
-  if (method === "GET" && path === "/v1/catalog") {
+  if (method === "GET" && requestPath === "/v1/catalog") {
     writeJson(res, 200, {
       providers: [
         {
@@ -306,7 +330,7 @@ async function handleClawRouterRequest(
     return;
   }
 
-  if (method === "GET" && path === "/v1/usage") {
+  if (method === "GET" && requestPath === "/v1/usage") {
     writeJson(res, 200, {
       budget: { configured: false, ledger: "unmetered" },
       usage: { summary: { requestCount: 0, totalTokens: 0, actualCostMicros: 0 } },
@@ -314,12 +338,12 @@ async function handleClawRouterRequest(
     return;
   }
 
-  if (method === "POST" && path === "/v1/responses") {
+  if (method === "POST" && requestPath === "/v1/responses") {
     writeResponsesStream(res, resolveResponseText(body));
     return;
   }
 
-  writeJson(res, 404, { error: { message: `unexpected ${method} ${path}` } });
+  writeJson(res, 404, { error: { message: `unexpected ${method} ${requestPath}` } });
 }
 
 function resolveResponseText(body: Record<string, unknown> | undefined): string {

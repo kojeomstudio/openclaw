@@ -1,4 +1,5 @@
 /** Command-registry facade for native specs, text aliases, argument parsing, and menus. */
+import { expectDefined } from "@openclaw/normalization-core";
 import { normalizeOptionalLowercaseString } from "@openclaw/normalization-core/string-coerce";
 import { DEFAULT_MODEL, DEFAULT_PROVIDER } from "../agents/defaults.js";
 import {
@@ -78,9 +79,13 @@ function resolveNativeName(
   );
 }
 
-function toNativeCommandSpec(command: ChatCommandDefinition, provider?: string): NativeCommandSpec {
+function toNativeCommandSpec(
+  command: ChatCommandDefinition,
+  provider?: string,
+  options?: NativeCommandProviderLookupOptions,
+): NativeCommandSpec {
   const spec: NativeCommandSpec = {
-    name: resolveNativeName(command, provider) ?? command.key,
+    name: resolveNativeName(command, provider, options) ?? command.key,
     description: command.description,
     acceptsArgs: Boolean(command.acceptsArgs),
     args: command.args,
@@ -91,8 +96,12 @@ function toNativeCommandSpec(command: ChatCommandDefinition, provider?: string):
   return spec;
 }
 
-function resolveNativeNames(command: ChatCommandDefinition, provider?: string): string[] {
-  const primary = resolveNativeName(command, provider);
+function resolveNativeNames(
+  command: ChatCommandDefinition,
+  provider?: string,
+  options?: NativeCommandProviderLookupOptions,
+): string[] {
+  const primary = resolveNativeName(command, provider, options);
   return [primary, ...(command.nativeAliases ?? [])].filter((name): name is string =>
     Boolean(name),
   );
@@ -114,6 +123,7 @@ function supportsNativeProvider(command: ChatCommandDefinition, provider?: strin
 function listNativeSpecsFromCommands(
   commands: ChatCommandDefinition[],
   provider?: string,
+  options?: NativeCommandProviderLookupOptions,
 ): NativeCommandSpec[] {
   return commands
     .filter(
@@ -121,8 +131,8 @@ function listNativeSpecsFromCommands(
         command.scope !== "text" && command.nativeName && supportsNativeProvider(command, provider),
     )
     .flatMap((command) => {
-      const spec = toNativeCommandSpec(command, provider);
-      return resolveNativeNames(command, provider).map((name, index) => {
+      const spec = toNativeCommandSpec(command, provider, options);
+      return resolveNativeNames(command, provider, options).map((name, index) => {
         const nativeSpec: NativeCommandSpec = {
           name,
           description: spec.description,
@@ -144,22 +154,62 @@ function listNativeSpecsFromCommands(
 }
 
 /** Lists native command specs registered for a provider, including skill commands. */
-export function listNativeCommandSpecs(params?: {
-  skillCommands?: SkillCommandSpec[];
-  provider?: string;
-}): NativeCommandSpec[] {
+export function listNativeCommandSpecs(
+  params?: {
+    skillCommands?: SkillCommandSpec[];
+    provider?: string;
+  } & NativeCommandProviderLookupOptions,
+): NativeCommandSpec[] {
   return listNativeSpecsFromCommands(
     listChatCommands({ skillCommands: params?.skillCommands }),
     params?.provider,
+    params,
   );
 }
 
 /** Lists native command specs that are enabled for the provided config. */
 export function listNativeCommandSpecsForConfig(
   cfg: OpenClawConfig,
-  params?: { skillCommands?: SkillCommandSpec[]; provider?: string },
+  params?: {
+    skillCommands?: SkillCommandSpec[];
+    provider?: string;
+  } & NativeCommandProviderLookupOptions,
 ): NativeCommandSpec[] {
-  return listNativeSpecsFromCommands(listChatCommandsForConfig(cfg, params), params?.provider);
+  return listNativeSpecsFromCommands(
+    listChatCommandsForConfig(cfg, params),
+    params?.provider,
+    params,
+  );
+}
+
+export function mergeNativeCommandSpecs(params: {
+  primary: readonly NativeCommandSpec[];
+  secondary: readonly NativeCommandSpec[];
+  onCollision?: (normalizedName: string) => void;
+}): NativeCommandSpec[] {
+  const merged: NativeCommandSpec[] = [];
+  const names = new Set<string>();
+  const append = (spec: NativeCommandSpec, reportCollision: boolean) => {
+    const normalizedName = normalizeOptionalLowercaseString(spec.name);
+    if (!normalizedName) {
+      return;
+    }
+    if (names.has(normalizedName)) {
+      if (reportCollision) {
+        params.onCollision?.(normalizedName);
+      }
+      return;
+    }
+    names.add(normalizedName);
+    merged.push(spec);
+  };
+  for (const spec of params.primary) {
+    append(spec, false);
+  }
+  for (const spec of params.secondary) {
+    append(spec, true);
+  }
+  return merged;
 }
 
 /** Finds a command definition by provider-native command name or native alias. */
@@ -205,7 +255,7 @@ function parsePositionalArgs(definitions: CommandArgDefinition[], raw: string): 
       values[definition.name] = tokens.slice(index).join(" ");
       break;
     }
-    values[definition.name] = tokens[index];
+    values[definition.name] = expectDefined(tokens[index], "command argument token");
     index += 1;
   }
   return values;
@@ -310,6 +360,7 @@ export function resolveCommandArgChoices(params: {
   cfg?: OpenClawConfig;
   provider?: string;
   model?: string;
+  agentRuntime?: string;
   catalog?: ThinkingCatalogEntry[];
 }): ResolvedCommandArgChoice[] {
   const { command, arg, cfg } = params;
@@ -325,6 +376,7 @@ export function resolveCommandArgChoices(params: {
           cfg,
           provider: params.provider ?? defaults.provider,
           model: params.model ?? defaults.model,
+          agentRuntime: params.agentRuntime,
           catalog: params.catalog ?? (cfg ? buildConfiguredModelCatalog({ cfg }) : undefined),
           command,
           arg,
@@ -343,9 +395,10 @@ export function resolveCommandArgMenu(params: {
   cfg?: OpenClawConfig;
   provider?: string;
   model?: string;
+  agentRuntime?: string;
   catalog?: ThinkingCatalogEntry[];
 }): { arg: CommandArgDefinition; choices: ResolvedCommandArgChoice[]; title?: string } | null {
-  const { command, args, cfg, provider, model, catalog } = params;
+  const { command, args, cfg, provider, model, agentRuntime, catalog } = params;
   if (!command.args || !command.argsMenu) {
     return null;
   }
@@ -364,6 +417,7 @@ export function resolveCommandArgMenu(params: {
               cfg,
               provider,
               model,
+              agentRuntime,
               catalog: resolvedCatalog,
             }).length > 0,
         )?.name
@@ -387,6 +441,7 @@ export function resolveCommandArgMenu(params: {
     cfg,
     provider,
     model,
+    agentRuntime,
     catalog: resolvedCatalog,
   });
   if (choices.length === 0) {

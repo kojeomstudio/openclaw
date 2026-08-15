@@ -8,13 +8,6 @@ vi.mock("../agents/agent-scope.js", () => ({
   resolveDefaultAgentId: vi.fn(() => "main"),
   resolveAgentWorkspaceDir: vi.fn(() => "/tmp/openclaw-agent"),
   resolveAgentDir: vi.fn(() => "/tmp/openclaw-agent/.openclaw-agent"),
-  resolveAgentEffectiveModelPrimary: vi.fn((cfg: OpenClawConfig) => {
-    const model = cfg.agents?.defaults?.model;
-    if (typeof model === "string") {
-      return model;
-    }
-    return model?.primary;
-  }),
 }));
 
 vi.mock("../agents/embedded-agent.js", () => ({
@@ -47,6 +40,7 @@ describe("generateSlugViaLLM", () => {
     await generateSlugViaLLM({
       sessionContent: "hello",
       cfg: {} as OpenClawConfig,
+      agentId: "main",
     });
 
     expect(runEmbeddedAgentMock).toHaveBeenCalledOnce();
@@ -59,6 +53,7 @@ describe("generateSlugViaLLM", () => {
     await generateSlugViaLLM({
       sessionContent: "hello",
       cfg: {} as OpenClawConfig,
+      agentId: "main",
     });
 
     expect(runEmbeddedAgentMock).toHaveBeenCalledOnce();
@@ -75,13 +70,14 @@ describe("generateSlugViaLLM", () => {
           },
         },
       } as OpenClawConfig,
+      agentId: "main",
     });
 
     expect(runEmbeddedAgentMock).toHaveBeenCalledOnce();
     expect(requireFirstRunOptions().timeoutMs).toBe(500_000);
   });
 
-  it("infers provider metadata for bare configured agent models", async () => {
+  it("delegates default model resolution to the embedded runner", async () => {
     await generateSlugViaLLM({
       sessionContent: "hello",
       cfg: {
@@ -90,32 +86,48 @@ describe("generateSlugViaLLM", () => {
             model: { primary: "gpt-5.5" },
           },
         },
-        models: {
-          providers: {
-            openai: {
-              baseUrl: "https://chatgpt.com/backend-api/codex",
-              models: [
-                {
-                  id: "gpt-5.5",
-                  name: "GPT 5.5",
-                  reasoning: true,
-                  input: ["text"],
-                  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-                  contextWindow: 200_000,
-                  maxTokens: 128_000,
-                },
-              ],
-            },
-          },
-        },
       } as OpenClawConfig,
+      agentId: "main",
     });
 
     expect(runEmbeddedAgentMock).toHaveBeenCalledOnce();
     const options = requireFirstRunOptions();
-    expect(options.provider).toBe("openai");
-    expect(options.model).toBe("gpt-5.5");
+    expect(options.provider).toBeUndefined();
+    expect(options.model).toBeUndefined();
   });
+
+  it("runs the helper under the authoritative session owner", async () => {
+    await generateSlugViaLLM({
+      sessionContent: "hello",
+      cfg: {
+        agents: { list: [{ id: "main" }, { id: "molty" }] },
+      },
+      agentId: "molty",
+    });
+
+    expect(runEmbeddedAgentMock).toHaveBeenCalledOnce();
+    expect(requireFirstRunOptions()).toMatchObject({
+      agentId: "molty",
+      sessionKey: expect.stringMatching(/^agent:molty:helper:incognito-/),
+    });
+  });
+
+  it.each(["gpt-5.5", "anthropic/claude-sonnet-4-6"])(
+    "passes hook-level model %s to the embedded runner without a provider",
+    async (model) => {
+      await generateSlugViaLLM({
+        sessionContent: "hello",
+        cfg: {} as OpenClawConfig,
+        agentId: "main",
+        model,
+      });
+
+      expect(runEmbeddedAgentMock).toHaveBeenCalledOnce();
+      const options = requireFirstRunOptions();
+      expect(options.provider).toBeUndefined();
+      expect(options.model).toBe(model);
+    },
+  );
 
   it("rejects error payloads before slugifying them into memory filenames", async () => {
     runEmbeddedAgentMock.mockResolvedValueOnce({
@@ -131,6 +143,7 @@ describe("generateSlugViaLLM", () => {
       generateSlugViaLLM({
         sessionContent: "hello",
         cfg: {} as OpenClawConfig,
+        agentId: "main",
       }),
     ).resolves.toBeNull();
   });
@@ -149,6 +162,7 @@ describe("generateSlugViaLLM", () => {
       generateSlugViaLLM({
         sessionContent: "hello",
         cfg: {} as OpenClawConfig,
+        agentId: "main",
       }),
     ).resolves.toBeNull();
   });
@@ -162,6 +176,7 @@ describe("generateSlugViaLLM", () => {
       generateSlugViaLLM({
         sessionContent: "hello",
         cfg: {} as OpenClawConfig,
+        agentId: "main",
       }),
     ).resolves.toBe("auth-refresh");
   });
@@ -175,6 +190,7 @@ describe("generateSlugViaLLM", () => {
       generateSlugViaLLM({
         sessionContent: "hello",
         cfg: {} as OpenClawConfig,
+        agentId: "main",
       }),
     ).resolves.toBe("12345678901234567890123456789");
   });
@@ -185,6 +201,7 @@ describe("generateSlugViaLLM", () => {
     await generateSlugViaLLM({
       sessionContent: `${prefix}🚀tail`,
       cfg: {} as OpenClawConfig,
+      agentId: "main",
     });
 
     const prompt = requireFirstRunOptions().prompt as string;

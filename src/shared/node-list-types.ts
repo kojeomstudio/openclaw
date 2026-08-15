@@ -1,3 +1,6 @@
+import type { NodePluginToolDescriptor } from "../../packages/gateway-protocol/src/schema/nodes.js";
+import type { ComputerUseCapabilityDescriptor } from "../plugins/computer-use-contract.js";
+
 /** Node record returned by gateway node-list endpoints. */
 export type NodeListNode = {
   nodeId: string;
@@ -8,12 +11,18 @@ export type NodeListNode = {
   uiVersion?: string;
   clientId?: string;
   clientMode?: string;
+  /** This node host runs from the Gateway's own canonical node-host installation. */
+  gatewayLocal?: boolean;
   remoteIp?: string;
   deviceFamily?: string;
   modelIdentifier?: string;
   pathEnv?: string;
   caps?: string[];
   commands?: string[];
+  computerUse?: ComputerUseCapabilityDescriptor;
+  /** Connected node currently advertises full worker session hosting. */
+  sessionHost?: boolean;
+  nodePluginTools?: NodePluginToolDescriptor[];
   permissions?: Record<string, boolean>;
   approvalState?: "approved" | "pending-approval" | "pending-reapproval" | "unapproved";
   pendingRequestId?: string;
@@ -23,6 +32,11 @@ export type NodeListNode = {
   paired?: boolean;
   connected?: boolean;
   connectedAtMs?: number;
+  lastConnectedAtMs?: number;
+  lastDisconnectedAtMs?: number;
+  lastActiveAtMs?: number;
+  presenceUpdatedAtMs?: number;
+  active?: boolean;
   lastSeenAtMs?: number;
   lastSeenReason?: string;
   approvedAtMs?: number;

@@ -2,7 +2,10 @@
 // Leaf contract shared by the domain modules (device-pairing.ts,
 // device-bootstrap.ts) and the SQLite row mapper (device-pairing-store.ts);
 // keeping it import-free of both sides prevents module cycles.
-import type { DeviceBootstrapProfile } from "../shared/device-bootstrap-profile.js";
+import type {
+  DeviceBootstrapProfile,
+  PairingSetupAccess,
+} from "../shared/device-bootstrap-profile.js";
 
 /** Pending device pairing request awaiting owner approval. */
 export type DevicePairingPendingRequest = {
@@ -14,6 +17,7 @@ export type DevicePairingPendingRequest = {
   deviceFamily?: string;
   clientId?: string;
   clientMode?: string;
+  browserOrigin?: string;
   role?: string;
   roles?: string[];
   scopes?: string[];
@@ -50,11 +54,19 @@ export type DeviceAuthToken = {
  * How the latest pairing approval was granted. "silent" is a same-host local
  * policy approval and the only prune-eligible kind: local clients re-pair
  * silently and cannot collide with another machine's records. "trusted-cidr"
- * is also non-interactive but crosses hosts, so it is never pruned
- * automatically (display metadata is not a machine identity). "owner" and
- * "bootstrap" approvals required a user action and are never pruned.
+ * and "ssh-verified" are also non-interactive but cross hosts, so they are
+ * never pruned automatically (display metadata is not a machine identity).
+ * "trusted-proxy" records were approved from an authenticated proxy identity.
+ * "owner" and "bootstrap" approvals required a user action. None of these
+ * cross-host or interactive approval kinds are pruned automatically.
  */
-export type PairedDeviceApprovalKind = "owner" | "silent" | "trusted-cidr" | "bootstrap";
+export type PairedDeviceApprovalKind =
+  | "owner"
+  | "silent"
+  | "trusted-cidr"
+  | "trusted-proxy"
+  | "ssh-verified"
+  | "bootstrap";
 
 /**
  * Approved node capability surface for a node-role device. Device pairing
@@ -76,6 +88,7 @@ export type PairedDeviceNodeSurface = {
   createdAtMs: number;
   approvedAtMs: number;
   lastConnectedAtMs?: number;
+  lastDisconnectedAtMs?: number;
 };
 
 /**
@@ -110,10 +123,12 @@ export type PairedDevice = {
   deviceId: string;
   publicKey: string;
   displayName?: string;
+  operatorLabel?: string;
   platform?: string;
   deviceFamily?: string;
   clientId?: string;
   clientMode?: string;
+  browserOrigin?: string;
   role?: string;
   roles?: string[];
   scopes?: string[];
@@ -132,6 +147,7 @@ export type PairedDevice = {
 /** Persisted bootstrap token state, including binding and role/scope redemption progress. */
 export type DeviceBootstrapTokenRecord = {
   token: string;
+  setupId?: string;
   ts: number;
   deviceId?: string;
   publicKey?: string;
@@ -140,4 +156,19 @@ export type DeviceBootstrapTokenRecord = {
   pendingProfile?: DeviceBootstrapProfile;
   issuedAtMs: number;
   lastUsedAtMs?: number;
+};
+
+/**
+ * Durable terminal outcome for one setup credential. Redemption deletes the
+ * bootstrap row, so this record is what lets a presenting client answer
+ * "did my setup code succeed?" without having received the broadcast.
+ */
+export type DevicePairSetupCompletionRecord = {
+  setupId: string;
+  deviceId: string;
+  deviceName?: string;
+  access: PairingSetupAccess;
+  completedAtMs: number;
+  deliveryState: "uncertain" | "confirmed";
+  retainUntilMs: number;
 };

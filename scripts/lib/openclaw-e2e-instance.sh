@@ -47,6 +47,20 @@ openclaw_e2e_resolve_entrypoint() {
   echo "OpenClaw entrypoint not found under dist/" >&2
   return 1
 }
+openclaw_e2e_run_script_entrypoint() {
+  local stem="${1:?missing OpenClaw E2E script stem}"
+  shift
+  if [ -f "$stem.mts" ]; then
+    tsx "$stem.mts" "$@"
+    return
+  fi
+  if [ -f "$stem.mjs" ]; then
+    node "$stem.mjs" "$@"
+    return
+  fi
+  echo "OpenClaw E2E script entrypoint not found: $stem.{mts,mjs}" >&2
+  return 1
+}
 openclaw_e2e_package_root() {
   local prefix="${1:-}"
   if [ -n "$prefix" ]; then
@@ -379,11 +393,12 @@ openclaw_e2e_terminate_gateways() {
 openclaw_e2e_start_mock_openai() { openclaw_e2e_start_tracked_process "$2" env "MOCK_PORT=$1" node scripts/e2e/mock-openai-server.mjs; }
 openclaw_e2e_wait_mock_openai() {
   local port="$1" attempts="${2:-80}" timeout_ms="${3:-400}" _
+  local base_url="${4:-http://127.0.0.1:${port}}"
   for _ in $(seq 1 "$attempts"); do
-    openclaw_e2e_probe_http "http://127.0.0.1:${port}/health" ok "$timeout_ms" && return 0
+    openclaw_e2e_probe_http "${base_url}/health" ok "$timeout_ms" && return 0
     sleep 0.1
   done
-  openclaw_e2e_probe_http "http://127.0.0.1:${port}/health" ok "$timeout_ms"
+  openclaw_e2e_probe_http "${base_url}/health" ok "$timeout_ms"
 }
 openclaw_e2e_start_gateway() { openclaw_e2e_start_tracked_process "$3" node "$1" gateway --port "$2" --bind loopback --allow-unconfigured; }
 openclaw_e2e_exec_gateway() { exec node "$1" gateway --port "$2" --bind "${3:-loopback}" --allow-unconfigured >"$4" 2>&1; }

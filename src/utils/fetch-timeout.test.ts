@@ -1,3 +1,4 @@
+import { toErrorObject as toLintErrorObject } from "@openclaw/normalization-core/error-coercion";
 // Fetch timeout tests cover abort handling and streamed response timeouts.
 import { Stream } from "openai/streaming";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -10,8 +11,8 @@ vi.mock("../logging/subsystem.js", () => ({
   })),
 }));
 
+import { MAX_SAFE_TIMEOUT_DELAY_MS } from "../../packages/gateway-client/src/timeouts.js";
 import { buildTimeoutAbortSignal, fetchWithTimeout } from "./fetch-timeout.js";
-import { MAX_SAFE_TIMEOUT_DELAY_MS } from "./timer-delay.js";
 
 function captureTimeoutLogUrl(url: string): Promise<Record<string, unknown>> {
   const { cleanup } = buildTimeoutAbortSignal({ timeoutMs: 25, operation: "unit-test", url });
@@ -191,6 +192,28 @@ describe("buildTimeoutAbortSignal", () => {
     expect(JSON.stringify(record)).not.toContain(SYNTHETIC_TELEGRAM_BOT_TOKEN);
   });
 
+  it("does not split surrogate pairs at the fallback timeout URL boundary", async () => {
+    const visiblePrefix = "x".repeat(499);
+    const record = await captureTimeoutLogUrl(`${visiblePrefix}🚀tail`);
+    const expectedUrl = `${visiblePrefix}...`;
+
+    expect(record.url).toBe(expectedUrl);
+    expect(record.consoleMessage).toBe(
+      `fetch timeout after 25ms (elapsed 25ms) operation=unit-test url=${expectedUrl}`,
+    );
+  });
+
+  it("keeps the full ASCII budget in fallback timeout URL logs", async () => {
+    const visiblePrefix = "x".repeat(500);
+    const record = await captureTimeoutLogUrl(`${visiblePrefix}tail`);
+    const expectedUrl = `${visiblePrefix}...`;
+
+    expect(record.url).toBe(expectedUrl);
+    expect(record.consoleMessage).toBe(
+      `fetch timeout after 25ms (elapsed 25ms) operation=unit-test url=${expectedUrl}`,
+    );
+  });
+
   it.each([
     ["https://example.com/bot/settings?safe=1", "https://example.com/bot/settings"],
     ["https://example.com/bots/chat?safe=1", "https://example.com/bots/chat"],
@@ -327,19 +350,38 @@ describe("buildTimeoutAbortSignal", () => {
     }
   });
 
-  it("does not log when a parent signal aborts first", async () => {
+  it("preserves the parent reason when a parent signal aborts first", async () => {
     const parent = new AbortController();
+    const reason = new Error("parent stopped");
     const { signal, cleanup } = buildTimeoutAbortSignal({
       timeoutMs: 25,
       signal: parent.signal,
       operation: "unit-test",
     });
 
-    parent.abort();
+    parent.abort(reason);
     await vi.advanceTimersByTimeAsync(25);
 
     expect(signal?.aborted).toBe(true);
-    expect(signal?.reason).not.toMatchObject({ name: "TimeoutError" });
+    expect(signal?.reason).toBe(reason);
+    expect(warn).not.toHaveBeenCalled();
+
+    cleanup();
+  });
+
+  it("preserves an already-aborted parent reason", () => {
+    const parent = new AbortController();
+    const reason = new Error("parent already stopped");
+    parent.abort(reason);
+
+    const { signal, cleanup } = buildTimeoutAbortSignal({
+      timeoutMs: 25,
+      signal: parent.signal,
+      operation: "unit-test",
+    });
+
+    expect(signal?.aborted).toBe(true);
+    expect(signal?.reason).toBe(reason);
     expect(warn).not.toHaveBeenCalled();
 
     cleanup();
@@ -404,17 +446,3 @@ describe("buildTimeoutAbortSignal", () => {
     }
   });
 });
-
-function toLintErrorObject(value: unknown, fallbackMessage: string): Error {
-  if (value instanceof Error) {
-    return value;
-  }
-  if (typeof value === "string") {
-    return new Error(value);
-  }
-  const error = new Error(fallbackMessage, { cause: value });
-  if ((typeof value === "object" && value !== null) || typeof value === "function") {
-    Object.assign(error, value);
-  }
-  return error;
-}

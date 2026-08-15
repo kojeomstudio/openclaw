@@ -1,13 +1,18 @@
+import { resolveAgentDir } from "openclaw/plugin-sdk/agent-runtime";
 // Codex plugin module implements conversation control behavior.
-import { CODEX_CONTROL_METHODS } from "./app-server/capabilities.js";
+import {
+  applyModelOverrideWithAuthProfileCompatibility,
+  ModelSelectionLockedError,
+} from "openclaw/plugin-sdk/model-session-runtime";
+import { patchSessionEntry, resolveStorePath } from "openclaw/plugin-sdk/session-store-runtime";
+import { resolveCodexBindingAppServerConnection } from "./app-server/binding-connection.js";
+import type { CodexAppServerClient } from "./app-server/client.js";
 import {
   isCodexFastServiceTier,
-  resolveCodexModelBackedReviewerPolicyContext,
-  resolveCodexAppServerRuntimeOptions,
   type CodexAppServerApprovalPolicy,
   type CodexAppServerSandboxMode,
 } from "./app-server/config.js";
-import type { CodexServiceTier, CodexThreadResumeResponse } from "./app-server/protocol.js";
+import type { CodexServiceTier } from "./app-server/protocol.js";
 import {
   bindingStoreKey,
   isCodexAppServerNativeAuthProfile,
@@ -28,6 +33,7 @@ import { formatCodexDisplayText } from "./command-formatters.js";
 
 type ActiveTurn = {
   identity: CodexAppServerBindingIdentity;
+  client?: CodexAppServerClient;
   threadId: string;
   turnId: string;
 };
@@ -75,15 +81,30 @@ export async function stopCodexConversationTurn(params: {
   if (!active) {
     return { stopped: false, message: "No active Codex run to stop." };
   }
-  const runtime = resolveCodexAppServerRuntimeOptions({ pluginConfig: params.pluginConfig });
   const lookup = buildBindingLookup(params);
   const binding = await params.bindingStore.read(params.identity);
-  const client = await getLeasedSharedCodexAppServerClient({
-    startOptions: runtime.start,
-    timeoutMs: runtime.requestTimeoutMs,
+  if (binding?.threadId !== active.threadId) {
+    return {
+      stopped: false,
+      message: "The active Codex run no longer matches this session binding.",
+    };
+  }
+  const connection = resolveCodexBindingAppServerConnection({
+    binding,
     authProfileId: binding?.authProfileId,
-    ...lookup,
+    pluginConfig: params.pluginConfig,
   });
+  const runtime = connection.appServer;
+  // Turn ids are connection-local. Prefer the exact live client; ID-only
+  // records must resolve the binding-owned connection before dispatch.
+  const client =
+    active.client ??
+    (await getLeasedSharedCodexAppServerClient({
+      startOptions: runtime.start,
+      timeoutMs: runtime.requestTimeoutMs,
+      authProfileId: connection.clientAuthProfileId,
+      ...lookup,
+    }));
   try {
     await client.request(
       "turn/interrupt",
@@ -94,7 +115,9 @@ export async function stopCodexConversationTurn(params: {
       { timeoutMs: runtime.requestTimeoutMs },
     );
   } finally {
-    releaseLeasedSharedCodexAppServerClient(client);
+    if (!active.client) {
+      releaseLeasedSharedCodexAppServerClient(client);
+    }
   }
   return { stopped: true, message: "Codex stop requested." };
 }
@@ -115,15 +138,30 @@ export async function steerCodexConversationTurn(params: {
   if (!active) {
     return { steered: false, message: "No active Codex run to steer." };
   }
-  const runtime = resolveCodexAppServerRuntimeOptions({ pluginConfig: params.pluginConfig });
   const lookup = buildBindingLookup(params);
   const binding = await params.bindingStore.read(params.identity);
-  const client = await getLeasedSharedCodexAppServerClient({
-    startOptions: runtime.start,
-    timeoutMs: runtime.requestTimeoutMs,
+  if (binding?.threadId !== active.threadId) {
+    return {
+      steered: false,
+      message: "The active Codex run no longer matches this session binding.",
+    };
+  }
+  const connection = resolveCodexBindingAppServerConnection({
+    binding,
     authProfileId: binding?.authProfileId,
-    ...lookup,
+    pluginConfig: params.pluginConfig,
   });
+  const runtime = connection.appServer;
+  // Turn ids are connection-local. Prefer the exact live client; ID-only
+  // records must resolve the binding-owned connection before dispatch.
+  const client =
+    active.client ??
+    (await getLeasedSharedCodexAppServerClient({
+      startOptions: runtime.start,
+      timeoutMs: runtime.requestTimeoutMs,
+      authProfileId: connection.clientAuthProfileId,
+      ...lookup,
+    }));
   try {
     await client.request(
       "turn/steer",
@@ -135,7 +173,9 @@ export async function steerCodexConversationTurn(params: {
       { timeoutMs: runtime.requestTimeoutMs },
     );
   } finally {
-    releaseLeasedSharedCodexAppServerClient(client);
+    if (!active.client) {
+      releaseLeasedSharedCodexAppServerClient(client);
+    }
   }
   return { steered: true, message: "Sent steer message to Codex." };
 }
@@ -147,6 +187,7 @@ export async function setCodexConversationModel(params: {
   pluginConfig?: unknown;
   agentDir?: string;
   config?: CodexAppServerBindingLookup["config"];
+  session?: { agentId: string; sessionId: string; sessionKey: string };
 }): Promise<string> {
   const model = params.model.trim();
   if (!model) {
@@ -154,23 +195,9 @@ export async function setCodexConversationModel(params: {
   }
   const lookup = buildBindingLookup(params);
   const binding = await requireThreadBinding(params.bindingStore, params.identity);
-  const reviewerPolicyContext = resolveCodexModelBackedReviewerPolicyContext({
-    provider: "codex",
-    model,
-    bindingModelProvider: binding.modelProvider,
-    bindingModel: binding.model,
-    nativeAuthProfile: isCodexAppServerNativeAuthProfile({
-      authProfileId: binding.authProfileId,
-      ...lookup,
-    }),
-  });
-  const runtime = resolveCodexAppServerRuntimeOptions({
-    pluginConfig: params.pluginConfig,
-    modelProvider: reviewerPolicyContext.modelProvider,
-    model: reviewerPolicyContext.model,
-    config: params.config,
-    agentDir: params.agentDir,
-  });
+  if (binding.connectionScope === "supervision") {
+    throw new ModelSelectionLockedError();
+  }
   const modelProvider = resolveConversationControlModelProvider({
     authProfileId: binding.authProfileId,
     bindingModel: binding.model,
@@ -184,33 +211,74 @@ export async function setCodexConversationModel(params: {
     authProfileId: binding.authProfileId,
     ...lookup,
   });
-  const response = await resumeThreadWithOverrides({
-    runtime,
-    threadId: binding.threadId,
-    authProfileId: binding.authProfileId,
-    ...lookup,
-    model: modelSelection.model,
-    modelProvider: modelSelection.modelProvider,
-  });
-  const nextModel = response.model ?? modelSelection.model;
   const nextModelProvider = normalizeCodexAppServerBindingModelProvider({
     authProfileId: binding.authProfileId,
-    modelProvider: response.modelProvider ?? modelSelection.modelProvider,
+    modelProvider: modelSelection.modelProvider,
     ...lookup,
   });
+  const nextModel = modelSelection.model;
   const modelChanged = nextModel !== binding.model || nextModelProvider !== binding.modelProvider;
-  await patchThreadBinding(params.bindingStore, params.identity, binding.threadId, {
-    cwd: response.thread.cwd ?? binding.cwd,
-    model: nextModel,
-    modelProvider: nextModelProvider,
-    ...(modelChanged && binding.contextEngine?.projection
-      ? { contextEngine: { ...binding.contextEngine, projection: undefined } }
-      : {}),
-    approvalPolicy: binding.approvalPolicy,
-    sandbox: binding.sandbox,
-    serviceTier: binding.serviceTier ?? runtime.serviceTier ?? undefined,
-  });
-  return `Codex model set to ${formatCodexDisplayText(response.model ?? model)}.`;
+  const session =
+    params.session ??
+    (params.identity.kind === "session" && params.identity.sessionKey
+      ? {
+          agentId: params.identity.agentId,
+          sessionId: params.identity.sessionId,
+          sessionKey: params.identity.sessionKey,
+        }
+      : undefined);
+  if (session) {
+    const updated = await patchSessionEntry({
+      agentId: session.agentId,
+      storePath: resolveStorePath(params.config?.session?.store, { agentId: session.agentId }),
+      sessionKey: session.sessionKey,
+      requireWriteSuccess: true,
+      // Model override helpers delete stale credentials and model metadata;
+      // replacing the snapshot is required because partial patches merge fields.
+      replaceEntry: true,
+      update: (entry) => {
+        if (entry.sessionId !== session.sessionId) {
+          throw new Error("Codex session changed while applying the model selection.");
+        }
+        applyModelOverrideWithAuthProfileCompatibility({
+          cfg: params.config ?? {},
+          agentDir: params.agentDir ?? resolveAgentDir(params.config ?? {}, session.agentId),
+          entry,
+          currentProvider: binding.modelProvider ?? "openai",
+          selection: { provider: nextModelProvider ?? "openai", model: nextModel },
+          markLiveSwitchPending: true,
+        });
+        return entry;
+      },
+    });
+    if (!updated) {
+      throw new Error("Codex session changed while applying the model selection.");
+    }
+    // SessionEntry owns desired selection; the native binding remains the
+    // currently loaded model so generation transitions still rotate safely.
+    if (params.identity.kind === "conversation") {
+      await patchThreadBinding(params.bindingStore, params.identity, binding.threadId, {
+        model: nextModel,
+        modelProvider: nextModelProvider,
+        ...(modelChanged && binding.contextEngine?.projection
+          ? { contextEngine: { ...binding.contextEngine, projection: undefined } }
+          : {}),
+      });
+    } else if (modelChanged && binding.contextEngine?.projection) {
+      await patchThreadBinding(params.bindingStore, params.identity, binding.threadId, {
+        contextEngine: { ...binding.contextEngine, projection: undefined },
+      });
+    }
+  } else {
+    await patchThreadBinding(params.bindingStore, params.identity, binding.threadId, {
+      model: nextModel,
+      modelProvider: nextModelProvider,
+      ...(modelChanged && binding.contextEngine?.projection
+        ? { contextEngine: { ...binding.contextEngine, projection: undefined } }
+        : {}),
+    });
+  }
+  return `Codex model set to ${formatCodexDisplayText(nextModel)}.`;
 }
 
 export async function setCodexConversationFastMode(params: {
@@ -310,44 +378,6 @@ async function patchThreadBinding(
 ): Promise<void> {
   if (!(await bindingStore.mutate(identity, { kind: "patch", threadId, patch }))) {
     throw new Error("Codex thread binding changed while applying the control update.");
-  }
-}
-
-async function resumeThreadWithOverrides(params: {
-  runtime: ReturnType<typeof resolveCodexAppServerRuntimeOptions>;
-  threadId: string;
-  authProfileId?: string;
-  agentDir?: string;
-  config?: CodexAppServerBindingLookup["config"];
-  model?: string;
-  modelProvider?: string | null;
-  approvalPolicy?: CodexAppServerApprovalPolicy;
-  sandbox?: CodexAppServerSandboxMode;
-  serviceTier?: CodexServiceTier;
-}): Promise<CodexThreadResumeResponse> {
-  const runtime = params.runtime;
-  const client = await getLeasedSharedCodexAppServerClient({
-    startOptions: runtime.start,
-    timeoutMs: runtime.requestTimeoutMs,
-    authProfileId: params.authProfileId,
-    ...buildBindingLookup(params),
-  });
-  try {
-    return await client.request(
-      CODEX_CONTROL_METHODS.resumeThread,
-      {
-        threadId: params.threadId,
-        ...(params.model ? { model: params.model } : {}),
-        ...(params.modelProvider ? { modelProvider: params.modelProvider } : {}),
-        approvalPolicy: params.approvalPolicy ?? runtime.approvalPolicy,
-        sandbox: params.sandbox ?? runtime.sandbox,
-        approvalsReviewer: runtime.approvalsReviewer,
-        ...(params.serviceTier ? { serviceTier: params.serviceTier } : {}),
-      },
-      { timeoutMs: runtime.requestTimeoutMs },
-    );
-  } finally {
-    releaseLeasedSharedCodexAppServerClient(client);
   }
 }
 

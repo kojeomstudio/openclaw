@@ -4,9 +4,15 @@
  */
 
 import crypto from "node:crypto";
-import { applyModelOverrideToSessionEntry } from "openclaw/plugin-sdk/model-session-runtime";
+import { resolveDefaultModelForAgent } from "openclaw/plugin-sdk/agent-runtime";
+import {
+  applyModelOverrideWithAuthProfileCompatibility,
+  ModelSelectionLockedError,
+  resolvePersistedSessionRuntimeId,
+} from "openclaw/plugin-sdk/model-session-runtime";
 import {
   isRecord,
+  filterStringEntries,
   normalizeLowercaseStringOrEmpty,
   normalizeStringEntries,
 } from "openclaw/plugin-sdk/string-coerce-runtime";
@@ -61,7 +67,7 @@ function readExplicitToolsAllow(value: unknown): string[] | undefined {
     return undefined;
   }
 
-  return allow.filter((entry): entry is string => typeof entry === "string");
+  return filterStringEntries(allow);
 }
 
 function resolveVoiceAgentToolsAllow(config: CoreConfig, agentId: string): string[] | undefined {
@@ -168,7 +174,11 @@ function sanitizePlainSpokenText(text: string): string | null {
 
   const paragraphs = normalizeStringEntries(withoutCodeFences.split(/\n\s*\n+/));
 
-  while (paragraphs.length > 1 && isLikelyMetaReasoningParagraph(paragraphs[0])) {
+  while (paragraphs.length > 1) {
+    const firstParagraph = paragraphs.at(0);
+    if (!firstParagraph || !isLikelyMetaReasoningParagraph(firstParagraph)) {
+      break;
+    }
     paragraphs.shift();
   }
 
@@ -284,8 +294,12 @@ export async function generateVoiceResponse(
 
         // Resolve model from config
         const { provider, model } = resolveVoiceResponseModel({ voiceConfig, agentRuntime });
+        const configuredModel = resolveDefaultModelForAgent({ cfg, agentId });
 
         let sessionEntry = existingSessionEntry;
+        if (sessionEntry?.modelSelectionLocked === true && voiceConfig.responseModel) {
+          throw new ModelSelectionLockedError();
+        }
         if (!sessionEntry?.sessionId || voiceConfig.responseModel) {
           sessionEntry =
             (await agentRuntime.session.patchSessionEntry({
@@ -305,8 +319,14 @@ export async function generateVoiceResponse(
                       updatedAt: now,
                     };
                 if (voiceConfig.responseModel) {
-                  applyModelOverrideToSessionEntry({
+                  applyModelOverrideWithAuthProfileCompatibility({
+                    cfg,
+                    agentDir,
                     entry: next,
+                    currentProvider:
+                      entry.providerOverride?.trim() ||
+                      entry.modelProvider?.trim() ||
+                      configuredModel.provider,
                     selection: { provider, model },
                     selectionSource: "auto",
                   });
@@ -323,6 +343,8 @@ export async function generateVoiceResponse(
           };
         }
         const sessionId = sessionEntry.sessionId;
+        const modelSelectionLocked = sessionEntry.modelSelectionLocked === true;
+        const persistedRuntimeId = resolvePersistedSessionRuntimeId(sessionEntry);
 
         // Resolve thinking level
         const thinkLevel = agentRuntime.resolveThinkingDefault({ cfg, provider, model });
@@ -373,6 +395,13 @@ export async function generateVoiceResponse(
           prompt: userMessage,
           provider,
           model,
+          modelSelectionLocked,
+          ...(persistedRuntimeId
+            ? {
+                agentHarnessId: persistedRuntimeId,
+                agentHarnessRuntimeOverride: persistedRuntimeId,
+              }
+            : {}),
           thinkLevel,
           verboseLevel: "off",
           timeoutMs,
@@ -442,6 +471,9 @@ export async function generateVoiceResponse(
       },
     );
   } catch (err) {
+    if (err instanceof ModelSelectionLockedError) {
+      return { text: null, deliveredEarly: false, error: err.message };
+    }
     console.error(`[voice-call] Response generation failed:`, err);
     return { text: null, deliveredEarly: false, error: String(err) };
   }

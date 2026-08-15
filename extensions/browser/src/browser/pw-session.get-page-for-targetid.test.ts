@@ -3,29 +3,33 @@ import { chromium } from "playwright-core";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as chromeModule from "./chrome.js";
 import { BrowserTabNotFoundError } from "./errors.js";
-import {
+import { pwAi } from "./pw-ai.js";
+
+const {
   closePageByTargetIdViaPlaywright,
   closePlaywrightBrowserConnection,
   focusPageByTargetIdViaPlaywright,
   getPageForTargetId,
   listPagesViaPlaywright,
-  setCdpConnectRetryDelayMsForTests,
-} from "./pw-session.js";
+} = pwAi;
 
 const connectOverCdpSpy = vi.spyOn(chromium, "connectOverCDP");
-const getChromeWebSocketUrlSpy = vi.spyOn(chromeModule, "getChromeWebSocketUrl");
+const getChromeWebSocketEndpointSpy = vi.spyOn(chromeModule, "getChromeWebSocketEndpoint");
 
 type MockPageSpec = {
   targetId?: string;
   url?: string;
   title?: string;
   targetLookupError?: string;
+  navigateDuringTargetLookup?: boolean;
+  subframeNavigationDuringTargetLookup?: boolean;
 };
 
 type BrowserMockBundle = {
   browser: import("playwright-core").Browser;
   browserClose: ReturnType<typeof vi.fn>;
   pages: import("playwright-core").Page[];
+  pageHandlers: Array<Map<string, Array<(...args: unknown[]) => void>>>;
   pageActions: Array<{
     bringToFront: ReturnType<typeof vi.fn>;
     close: ReturnType<typeof vi.fn>;
@@ -39,12 +43,18 @@ function makeBrowser(pages: MockPageSpec[]): BrowserMockBundle {
     bringToFront: vi.fn(async () => {}),
     close: vi.fn(async () => {}),
   }));
+  const pageHandlers = pages.map(() => new Map<string, Array<(...args: unknown[]) => void>>());
 
   const pageObjects = pages.map((spec, index) => {
     const actions = pageActions[index]!;
+    const handlers = pageHandlers[index]!;
+    const mainFrame = { url: () => spec.url ?? `https://page-${index + 1}.example` };
     const page = {
-      on: vi.fn(),
+      on: vi.fn((event: string, handler: (...args: unknown[]) => void) => {
+        handlers.set(event, [...(handlers.get(event) ?? []), handler]);
+      }),
       context: () => context,
+      mainFrame: () => mainFrame,
       title: vi.fn(async () => spec.title ?? spec.targetId ?? `page-${index + 1}`),
       url: vi.fn(() => spec.url ?? `https://page-${index + 1}.example`),
       bringToFront: actions.bringToFront,
@@ -67,6 +77,16 @@ function makeBrowser(pages: MockPageSpec[]): BrowserMockBundle {
           if (spec?.targetLookupError) {
             throw new Error(spec.targetLookupError);
           }
+          if (spec?.navigateDuringTargetLookup) {
+            const pageIndex = pageObjects.indexOf(page);
+            pageHandlers[pageIndex]?.get("framenavigated")?.[0]?.(page.mainFrame());
+          }
+          if (spec?.subframeNavigationDuringTargetLookup) {
+            const pageIndex = pageObjects.indexOf(page);
+            pageHandlers[pageIndex]?.get("framenavigated")?.[0]?.({
+              url: () => "https://frame.example/new",
+            });
+          }
           return { targetInfo: { targetId: spec?.targetId } };
         }),
         detach: vi.fn(async () => {}),
@@ -81,20 +101,19 @@ function makeBrowser(pages: MockPageSpec[]): BrowserMockBundle {
     close: browserClose,
   } as unknown as import("playwright-core").Browser;
 
-  return { browser, browserClose, pages: pageObjects, pageActions };
+  return { browser, browserClose, pages: pageObjects, pageHandlers, pageActions };
 }
 
 function installBrowser(pages: MockPageSpec[]): BrowserMockBundle {
   const bundle = makeBrowser(pages);
   connectOverCdpSpy.mockResolvedValue(bundle.browser);
-  getChromeWebSocketUrlSpy.mockResolvedValue(null);
+  getChromeWebSocketEndpointSpy.mockResolvedValue(null);
   return bundle;
 }
 
 afterEach(async () => {
   connectOverCdpSpy.mockReset();
-  getChromeWebSocketUrlSpy.mockReset();
-  setCdpConnectRetryDelayMsForTests();
+  getChromeWebSocketEndpointSpy.mockReset();
   await closePlaywrightBrowserConnection().catch(() => {});
 });
 
@@ -208,7 +227,7 @@ describe("pw-session getPageForTargetId", () => {
     const fresh = makeBrowser([{ targetId: "TARGET_OK", url: "https://fresh.example" }]);
 
     connectOverCdpSpy.mockResolvedValueOnce(stale.browser).mockResolvedValueOnce(fresh.browser);
-    getChromeWebSocketUrlSpy.mockResolvedValue(null);
+    getChromeWebSocketEndpointSpy.mockResolvedValue(null);
 
     await listPagesViaPlaywright({ cdpUrl: "http://127.0.0.1:9222" });
 
@@ -230,7 +249,7 @@ describe("pw-session getPageForTargetId", () => {
     ]);
 
     connectOverCdpSpy.mockResolvedValueOnce(stale.browser).mockResolvedValueOnce(fresh.browser);
-    getChromeWebSocketUrlSpy.mockResolvedValue(null);
+    getChromeWebSocketEndpointSpy.mockResolvedValue(null);
 
     await getPageForTargetId({ cdpUrl: "http://127.0.0.1:9333" });
 
@@ -251,7 +270,7 @@ describe("pw-session getPageForTargetId", () => {
     connectOverCdpSpy
       .mockResolvedValueOnce(stale.browser)
       .mockResolvedValueOnce(stillBroken.browser);
-    getChromeWebSocketUrlSpy.mockResolvedValue(null);
+    getChromeWebSocketEndpointSpy.mockResolvedValue(null);
 
     await listPagesViaPlaywright({ cdpUrl: "http://127.0.0.1:9444" });
 
@@ -263,9 +282,8 @@ describe("pw-session getPageForTargetId", () => {
   });
 
   it("does not add an extra top-level retry for non-recoverable connect failures", async () => {
-    setCdpConnectRetryDelayMsForTests(0);
     connectOverCdpSpy.mockRejectedValue(new Error("connectOverCDP exploded"));
-    getChromeWebSocketUrlSpy.mockResolvedValue(null);
+    getChromeWebSocketEndpointSpy.mockResolvedValue(null);
 
     await expect(getPageForTargetId({ cdpUrl: "http://127.0.0.1:9555" })).rejects.toThrow(
       "connectOverCDP exploded",

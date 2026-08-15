@@ -5,19 +5,17 @@ import {
 } from "@openclaw/normalization-core/string-coerce";
 import { canonicalizePath } from "../../agents/utils/paths.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
+import { createDedupeCache } from "../../infra/dedupe.js";
 import { createSubsystemLogger } from "../../logging/subsystem.js";
 import { loadEnabledClaudeBundleCommands } from "../../plugins/bundle-commands.js";
 import { resolveSkillTelemetrySource } from "../loading/source.js";
-import {
-  filterWorkspaceSkillEntriesWithOptions,
-  loadVisibleWorkspaceSkillEntries,
-} from "../loading/workspace.js";
+import { filterWorkspaceSkills, loadVisibleSkills } from "../loading/workspace-skill-loader.js";
 import type { SkillEligibilityContext, SkillCommandSpec, SkillEntry } from "../types.js";
 import { resolveEffectiveAgentSkillFilter } from "./agent-filter.js";
-import { filterUserInvocableSkillEntries } from "./skill-index.js";
+import { filterUserInvocableSkillEntries, isSkillPromptVisible } from "./skill-index.js";
 
 const skillsLogger = createSubsystemLogger("skills");
-const skillCommandDebugOnce = new Set<string>();
+const skillCommandDebugOnce = createDedupeCache({ ttlMs: 0, maxSize: 1024 });
 const SKILL_COMMAND_MAX_LENGTH = 32;
 const SKILL_COMMAND_FALLBACK = "skill";
 
@@ -27,10 +25,9 @@ function debugSkillCommandOnce(
   message: string,
   meta?: Record<string, unknown>,
 ) {
-  if (skillCommandDebugOnce.has(messageKey)) {
+  if (skillCommandDebugOnce.check(messageKey)) {
     return;
   }
-  skillCommandDebugOnce.add(messageKey);
   skillsLogger.debug(message, meta);
 }
 
@@ -39,10 +36,9 @@ function traceSkillCommandOnce(
   message: string,
   meta?: Record<string, unknown>,
 ) {
-  if (skillCommandDebugOnce.has(messageKey)) {
+  if (skillCommandDebugOnce.check(messageKey)) {
     return;
   }
-  skillCommandDebugOnce.add(messageKey);
   skillsLogger.trace(message, meta);
 }
 
@@ -90,12 +86,12 @@ export function buildWorkspaceSkillCommandSpecs(
   const effectiveSkillFilter =
     opts?.skillFilter ?? resolveEffectiveAgentSkillFilter(opts?.config, opts?.agentId);
   const eligible = opts?.entries
-    ? filterWorkspaceSkillEntriesWithOptions(opts.entries, {
+    ? filterWorkspaceSkills(opts.entries, {
         config: opts?.config,
         skillFilter: effectiveSkillFilter,
         eligibility: opts?.eligibility,
       })
-    : loadVisibleWorkspaceSkillEntries(workspaceDir, {
+    : loadVisibleSkills(workspaceDir, {
         config: opts?.config,
         managedSkillsDir: opts?.managedSkillsDir,
         bundledSkillsDir: opts?.bundledSkillsDir,
@@ -129,48 +125,56 @@ export function buildWorkspaceSkillCommandSpecs(
     }
     used.add(normalizeLowercaseStringOrEmpty(unique));
     const description = entry.skill.description?.trim() || rawName;
-    const dispatch = (() => {
-      const kindRaw = normalizeLowercaseStringOrEmpty(
-        entry.frontmatter?.["command-dispatch"] ?? entry.frontmatter?.["command_dispatch"] ?? "",
-      );
-      if (!kindRaw || kindRaw !== "tool") {
-        return undefined;
-      }
+    const dispatch = entry.disableCommandDispatch
+      ? undefined
+      : (() => {
+          const kindRaw = normalizeLowercaseStringOrEmpty(
+            entry.frontmatter?.["command-dispatch"] ??
+              entry.frontmatter?.["command_dispatch"] ??
+              "",
+          );
+          if (!kindRaw || kindRaw !== "tool") {
+            return undefined;
+          }
 
-      const toolName = (
-        entry.frontmatter?.["command-tool"] ??
-        entry.frontmatter?.["command_tool"] ??
-        ""
-      ).trim();
-      if (!toolName) {
-        debugSkillCommandOnce(
-          `dispatch:missingTool:${rawName}`,
-          `Skill command "/${unique}" requested tool dispatch but did not provide command-tool. Ignoring dispatch.`,
-          { skillName: rawName, command: unique },
-        );
-        return undefined;
-      }
+          const toolName = (
+            entry.frontmatter?.["command-tool"] ??
+            entry.frontmatter?.["command_tool"] ??
+            ""
+          ).trim();
+          if (!toolName) {
+            debugSkillCommandOnce(
+              `dispatch:missingTool:${rawName}`,
+              `Skill command "/${unique}" requested tool dispatch but did not provide command-tool. Ignoring dispatch.`,
+              { skillName: rawName, command: unique },
+            );
+            return undefined;
+          }
 
-      const argModeRaw = normalizeOptionalLowercaseString(
-        entry.frontmatter?.["command-arg-mode"] ?? entry.frontmatter?.["command_arg_mode"] ?? "",
-      );
-      const argMode = !argModeRaw || argModeRaw === "raw" ? "raw" : null;
-      if (!argMode) {
-        debugSkillCommandOnce(
-          `dispatch:badArgMode:${rawName}:${argModeRaw}`,
-          `Skill command "/${unique}" requested tool dispatch but has unknown command-arg-mode. Falling back to raw.`,
-          { skillName: rawName, command: unique, argMode: argModeRaw },
-        );
-      }
+          const argModeRaw = normalizeOptionalLowercaseString(
+            entry.frontmatter?.["command-arg-mode"] ??
+              entry.frontmatter?.["command_arg_mode"] ??
+              "",
+          );
+          const argMode = !argModeRaw || argModeRaw === "raw" ? "raw" : null;
+          if (!argMode) {
+            debugSkillCommandOnce(
+              `dispatch:badArgMode:${rawName}:${argModeRaw}`,
+              `Skill command "/${unique}" requested tool dispatch but has unknown command-arg-mode. Falling back to raw.`,
+              { skillName: rawName, command: unique, argMode: argModeRaw },
+            );
+          }
 
-      return { kind: "tool", toolName, argMode: "raw" } as const;
-    })();
+          return { kind: "tool", toolName, argMode: "raw" } as const;
+        })();
 
     specs.push({
       name: unique,
+      displayName: entry.skill.displayName ?? rawName,
       skillFile: canonicalizePath(entry.skill.filePath),
       skillName: rawName,
       description,
+      modelVisible: isSkillPromptVisible(entry),
       skillSource: resolveSkillTelemetrySource(entry.skill),
       ...(dispatch ? { dispatch } : {}),
     });
@@ -202,6 +206,7 @@ export function buildWorkspaceSkillCommandSpecs(
       name: unique,
       skillName: entry.rawName,
       description: entry.description,
+      modelVisible: false,
       promptTemplate: entry.promptTemplate,
       sourceFilePath: entry.sourceFilePath,
     });
